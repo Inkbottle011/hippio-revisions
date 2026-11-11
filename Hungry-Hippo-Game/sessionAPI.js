@@ -322,7 +322,7 @@ wss.on('connection', (ws) => {
         ws.sessionId = sessionId;
         ws.userId = userId;
         ws.role = role;
-        ws.color = color;
+        ws.color = color ?? ws.color;
 
         if (!sessions[sessionId]) {
           sendError(ws, {
@@ -1148,14 +1148,5 @@ function sendError(ws, { code = 'SERVER_ERROR', message, ...meta }) {
       payload: { code, message, ...meta },
     }),
   );
-}
-
-module.exports = {
-  handleClientClose,
-  sessions,
-  fruitIntervals,
-  emptySessionTimers,
-  EMPTY_SESSION_GRACE_MS,
-  trackHeartbeat,
-  checkHeartbeats,
-};
+}          
+          module.exports = {wss, handleClientClose, sessions, fruitIntervals, emptySessionTimers, EMPTY_SESSION_GRACE_MS };
