@@ -151,3 +151,76 @@ describe('WebSocketContext reconnect and message queue', () => {
         expect(getReconnectDelay(20)).toBe(10000);
     });
 });
+describe('WebSocketContext message subscriptions', () => {
+  beforeEach(() => {
+    MockWebSocket.instances = [];
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const deliver = (message: object) => latestSocket().onmessage?.({ data: JSON.stringify(message) });
+
+  it('delivers every message to subscribers, even when several arrive together', () => {
+    const { ctx } = renderProvider();
+    const seen: string[] = [];
+    act(() => {
+      ctx.current!.subscribe('AAC_TARGET_FOOD', (m) => seen.push(`target:${m.payload.targetFoodId}`));
+      ctx.current!.subscribe('REMOVE_FOOD', (m) => seen.push(`remove:${m.payload.instanceId}`));
+    });
+
+    act(() => {
+      deliver({ type: 'AAC_TARGET_FOOD', payload: { targetFoodId: 'apple' } });
+      deliver({ type: 'REMOVE_FOOD', payload: { instanceId: 'food-1' } });
+      deliver({ type: 'REMOVE_FOOD', payload: { instanceId: 'food-2' } });
+    });
+
+    expect(seen).toEqual(['target:apple', 'remove:food-1', 'remove:food-2']);
+  });
+
+  it('only delivers the message types a listener subscribed to', () => {
+    const { ctx } = renderProvider();
+    const listener = vi.fn();
+    act(() => {
+      ctx.current!.subscribe('REMOVE_FOOD', listener);
+    });
+
+    act(() => deliver({ type: 'FOOD_STATE_UPDATE', payload: { foods: [] } }));
+
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('stops delivering after unsubscribing', () => {
+    const { ctx } = renderProvider();
+    const listener = vi.fn();
+    let unsubscribe = () => {};
+    act(() => {
+      unsubscribe = ctx.current!.subscribe('REMOVE_FOOD', listener);
+    });
+
+    act(() => deliver({ type: 'REMOVE_FOOD', payload: { instanceId: 'food-1' } }));
+    unsubscribe();
+    act(() => deliver({ type: 'REMOVE_FOOD', payload: { instanceId: 'food-2' } }));
+
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps delivering to other listeners if one throws', () => {
+    const { ctx } = renderProvider();
+    const good = vi.fn();
+    act(() => {
+      ctx.current!.subscribe('REMOVE_FOOD', () => {
+        throw new Error('broken handler');
+      });
+      ctx.current!.subscribe('REMOVE_FOOD', good);
+    });
+
+    act(() => deliver({ type: 'REMOVE_FOOD', payload: { instanceId: 'food-1' } }));
+
+    expect(good).toHaveBeenCalledTimes(1);
+  });
+});
