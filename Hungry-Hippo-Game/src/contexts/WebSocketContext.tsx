@@ -2,11 +2,13 @@ import React, { createContext, useCallback, useContext, useEffect, useRef, useSt
 import { movementStore } from '../game/scenes/MovementStore';
 import { EventBus } from '../game/EventBus';
 
+// A function that receives every server message of the type it subscribed to
+export type MessageListener = (message: any) => void;
+
 interface IWebSocketContext {
   isConnected: boolean;
-  lastMessage: any;
   sendMessage: (message: object) => void;
-  clearLastMessage?: () => void;
+  subscribe: (type: string, listener: MessageListener) => () => void;
   connectedUsers: { userId: string; role: string; color?: string }[];
   gameStarted: boolean;
   resetGameState: () => void;
@@ -32,7 +34,8 @@ const WebSocketContext = createContext<IWebSocketContext | null>(null);
 
 export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [isConnected, setIsConnected] = useState(false);
-  const [lastMessage, setLastMessage] = useState<any>(null);
+  // Listeners for each message type, called directly as messages arrive (not through React state)
+  const listeners = useRef(new Map<string, Set<MessageListener>>());
   const [connectedUsers, setConnectedUsers] = useState<{ userId: string; role: string; color?: string }[]>([]);
   const ws = useRef<WebSocket | null>(null);
   const [gameStarted, setGameStarted] = useState(false);
@@ -119,26 +122,24 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         const data = JSON.parse(event.data);
         // console.log('[WS_CONTEXT] Message from server:', data);
 
+        // Hand the message to every page that subscribed to this type.
+        // Each message is delivered on its own, so two messages arriving together are both seen.
+        listeners.current.get(data.type)?.forEach((listener) => {
+          try {
+            listener(data);
+          } catch (err) {
+            console.error(`[WS_CONTEXT] Error handling ${data.type}:`, err);
+          }
+        });
+
         if (data.type === 'ERROR_MESSAGE') {
           console.error('[WS_CONTEXT] Received error from server:', data.payload.message);
-          setLastMessage(data);
-          return;
-        }
-
-        if (data.type === 'COLOR_UPDATE') {
-          setLastMessage(data);
           return;
         }
 
         if (data.type === 'TIMER_UPDATE') {
          // console.log(`[WS_CONTEXT] Timer update: ${data.secondsLeft} seconds left`);
           EventBus.emit('TIMER_UPDATE', data.secondsLeft);
-
-          setLastMessage({
-            type: 'TIMER_UPDATE',
-            payload: { secondsLeft: data.secondsLeft },
-          });
-
           return;
         }
 
@@ -161,7 +162,6 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           if (data.payload?.mode) {
             setGameMode(data.payload.mode);
           }
-          setLastMessage(data);
 
           EventBus.emit('start-game');
           return;
@@ -184,14 +184,12 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         if (data.type === 'GAME_OVER') {
           //console.log('[WS_CONTEXT] GAME_OVER');
           EventBus.emit('gameOver', data.payload);
-          setLastMessage(data);
           return;
         }
 
         if (data.type === 'RESET_GAME_BROADCAST') {
           console.log('[WS_CONTEXT] Game reset received.');
           setGameStarted(false);
-          setLastMessage(data);
           EventBus.emit('RESET_GAME');
           return;
         }
@@ -200,11 +198,9 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           console.log('[WS_CONTEXT] Users updated from local storage:', data.payload.users);
           setConnectedUsers(data.payload.users);
           EventBus.emit('players-updated', data.payload.users);
-          setLastMessage(data);
           return;
         }
 
-        setLastMessage(data);
       };
 
       socket.onerror = (err) => {
@@ -221,8 +217,20 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     };
   }, []);
 
-  const clearLastMessage = useCallback(() => {
-    setLastMessage(null);
+  /**
+   * Calls `listener` with every message of `type` the server sends.
+   * Returns a function that stops listening.
+   */
+  const subscribe = useCallback((type: string, listener: MessageListener) => {
+    let forType = listeners.current.get(type);
+    if (!forType) {
+      forType = new Set();
+      listeners.current.set(type, forType);
+    }
+    forType.add(listener);
+    return () => {
+      forType!.delete(listener);
+    };
   }, []);
 
   const sendMessage = useCallback((message: object) => {
@@ -260,10 +268,9 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const value = {
     isConnected,
-    lastMessage,
     sendMessage,
+    subscribe,
     startTimer,
-    clearLastMessage,
     connectedUsers,
     gameStarted,
     sessionId,
@@ -287,3 +294,17 @@ export const useWebSocket = () => {
   }
   return context;
 };
+
+/**
+ * Runs `handler` for every message of `type` from the server while the component is mounted.
+ * The handler always sees the component's latest props and state.
+ *
+ * Example: useMessage('REMOVE_FOOD', (message) => removeFood(message.payload.instanceId));
+ */
+export function useMessage(type: string, handler: MessageListener) {
+  const { subscribe } = useWebSocket();
+  const handlerRef = useRef(handler);
+  handlerRef.current = handler;
+
+  useEffect(() => subscribe(type, (message) => handlerRef.current(message)), [type, subscribe]);
+}
